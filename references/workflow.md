@@ -1,0 +1,70 @@
+# Inductor 模型性能分析与优化流程
+
+版本：2026-11-11（随每个模型的分析更新）
+
+本流程用于用户已初步确认存在性能问题的 TorchBench、HuggingFace、timm 等模型：编译后比 eager 慢，或编译相对 eager 的提升明显小于 NV 官方结果。每个模型保留一份独立报告；通用方法和已证实的共性经验回写本文件。当前实例：[mnasnet1_0 报告](./mnasnet1_0-case.md)。
+
+## 1. 建立模型报告与测量口径
+
+复制[模型报告模板](../assets/model-report-template.md)，命名为 `<模型名>_性能异常分析.md`。同一模型的不同 batch、精度或运行模式可在同一报告中分场景记录；问题机制不同且证据复杂时再拆分。先写明：
+
+- 模型来源、用途、主体结构、输入输出、关键算子和 TorchBench/HuggingFace 包装方式；区分预训练权重和随机权重复现。
+- 用户提供的异常数据、文件位置、指标定义、硬件及软件版本、推理/训练、batch、dtype、静态/动态形状、Graph 开关。
+- `abs_latency` 是编译路径稳态耗时，单位 **ms**；`compilation_latency` 是首次编译耗时，单位 **s**；`speedup = eager / compiled`。没有提供的列写“未提供”，不能从 `abs_latency` 推断编译耗时。
+- 结果来源标为“用户原始数据”“本地正式 benchmark”“局部复现”“profiler trace”，不同来源不混作同口径前后对比。
+
+先检查工作树状态，保留已有改动。记录源码提交、安装版 PyTorch、HIP/ROCm 或 CUDA、GPU 型号及驱动、benchmark 仓库版本；若原始数据与本地设备不同，明确说明可复现性和数值可比性的边界。
+
+## 2. 修改前复测基线
+
+优先按[模型编译测试使用文档](./benchmark-guide.md)用原 benchmark 入口重测。保留完整命令、环境变量、原始 CSV、日志、输出目录、测量日期和进程退出码。先做 `--accuracy`，再做 `--performance --cold-start-latency`；两者需要分开运行。动态 batch 场景使用 `--dynamic-shapes --dynamic-batch-only`，Graph 关闭场景使用 `--disable-cudagraphs`。示例在激活环境后的 PyTorch 仓库根目录执行，并按当前机器调整输出路径：
+
+```bash
+python benchmarks/dynamo/torchbench.py --performance --cold-start-latency \
+  --inference --bfloat16 --backend inductor --device cuda \
+  --dynamic-shapes --dynamic-batch-only --only mnasnet1_0 \
+  --output-directory /workspace/perf_results/mnasnet1_0/before \
+  --output before.csv
+```
+
+具体模型换用 `huggingface.py` 或 `timm_models.py`。基线必须与目标异常的 batch、dtype、模式、输入形状、动态维和 Graph 设置一致。清楚记录缓存状态；若设置 `TORCHINDUCTOR_CACHE_DIR`，需确认 `--cold-start-latency` 的清缓存行为。性能至少报告原始多次结果和中位数（条件允许时不少于三次独立运行），同时保留波动范围。若时间、模型依赖或设备条件使正式复测不可行，写明原因及可用替代证据，状态标“待复测”，后续补齐；不得把局部复现数值当作正式基线。
+
+## 3. 定位慢在哪一段
+
+1. **先分阶段。** 区分模型加载、首次编译/捕获、后续稳态推理、同步等待。检查 `compilation_latency`、`abs_latency`、日志和阶段指标；不要因表头或文件名含 compile 就把稳态慢解释为编译慢。
+2. **对齐 trace。** 找到与异常场景相同的 eager/compiled trace，核对设备、输入、运行次数和时间单位。profiler 通常在 benchmark 计时后单独运行，会引入开销，trace 时长不可直接代替 CSV 的稳态耗时。
+3. **单变量对照。** 按需比较 eager/compiled、Graph 开/关、静态/动态 batch、dtype、输入布局、batch 大小、完整模型/切片；每次只改变一个条件。记录数值及是否触发错误，避免把多个变化共同作用解释为单一根因。
+4. **找最小错误条件。** 先定位 CPU 调用、GPU kernel、Graph capture/replay 或同步；随后缩减模块/算子，保留同样的形状和输入来源。裁剪模型可能改变融合、内存规划和算法选择，因此每个缩减片段都要重做必要的单变量对照。
+5. **选正确修复层。** 分别检验 benchmark 包装、Dynamo 图断开/重编译、Inductor 调度与生成代码、Triton kernel、CUDA Graph Tree、HIP/CUDA runtime 和底层库。能在纯 eager 手动 Graph 重现的问题，不应仅凭表象改 Inductor codegen；需要把是否同一内部缺陷作为假设记录。
+
+对 Graph 问题，记录捕获与回放的输入 shape/stride/dtype、指针与别名关系、节点拓扑和依赖、kernel 序列、同步点、输出生命周期、设备错误日志。公开 HIP API 如只给出不透明节点类型，报告必须说明观察边界，不能据顶层拓扑相同断定内部节点相同。探针和 profiler 可能改变捕获时机，性能结果需用未插桩运行复核。
+
+## 4. 假设、修改与验证
+
+在报告里为每个假设写“证据—单变量实验—结果—保留/排除”。定位到可执行的修复点后，实施尽可能局部的代码修改，记下文件/提交、修改原因、预期机制、正确性影响、适用范围和可能的回归。临时关闭 Graph 等规避方式要与根因修复分开标记。
+
+修改后用与第 2 步**完全相同**的入口、设备和输入设置重新跑 accuracy 与 performance，保存原始结果。记录 eager、compiled、speedup、`compilation_latency`、Graph 开关和波动；必要时测相关邻近模型/形状和 NV 对照。若换了设备或软件版本，不把前后数值放进同一性能提升计算；应重新建立同设备修改前基线。
+
+| 阶段 | 环境/代码版本 | eager ms | compiled ms | speedup | compilation_latency s | accuracy | 原始结果 |
+|---|---|---:|---:|---:|---:|---|---|
+| 修改前 | 待填 | 待测 | 待测 | 待测 | 待测 | 待测 | 待填 |
+| 修改后 | 待填 | 待测 | 待测 | 待测 | 待测 | 待测 | 待填 |
+
+只有同口径数据才能计算改善倍数。没有修复时如实保留“已定位/待底层证据/待修改/待复测”的状态，不填虚构的“修改后”。
+
+## 5. 每个案例结束时维护本流程
+
+在模型报告末尾写“可复用发现”：新的定位顺序、可靠的对照、易误读指标、失败探针、可复用脚本和适用边界。若可迁移到别的模型，把简短规则及模型报告链接补到本文件；特定设备日志、全部试验数字和未证实猜测留在模型报告。修订本流程时更新下方记录。
+
+### 已积累的共性经验
+
+- **指标口径：** `abs_latency` 与 `compilation_latency` 分属稳态运行和首次编译，单位也不同；原始对比 CSV 可能缺后一列。见 [mnasnet1_0](./mnasnet1_0-case.md)。
+- **Graph 定位：** 同一输入分别跑静态/动态及 Graph 开/关；把捕获、回放、内存和节点证据分开记录。trace 中“耗时最长的 kernel”不一定是缺陷所在，因为 Graph 停顿可落在不同事件上。
+- **缩减验证：** 纯 eager 手动 Graph 能复现时，可排除 Inductor/CUDA Graph Tree 作为该小图触发的必要条件；是否解释完整模型仍需独立证据。裁剪后要重新验证静态/动态条件。
+- **插桩影响：** Graph 探针、profiler 可能改变实例化时机、耗时，甚至触发 VMFault；必须把插桩观察与正式 benchmark 分开。
+
+### 修订记录
+
+| 日期 | 变更 | 依据 |
+|---|---|---|
+| 2026-11-11 | 初版：统一模型报告、基线/复测口径、Graph 单变量定位与回写规则 | mnasnet1_0 分析与 benchmark 使用文档 |

@@ -1,0 +1,3 @@
+interface:
+  display_name: "Inductor Model Performance"
+  short_description: "Investigate and optimize compiled model performance."
