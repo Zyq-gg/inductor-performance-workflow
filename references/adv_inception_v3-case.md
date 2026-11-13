@@ -1,10 +1,12 @@
 # adv_inception_v3：DCU 编译后推理和训练性能分析
 
-状态：noGraph 主瓶颈已定位并验证配置规避；Graph 开启模式与 NV 差距的剩余原因待进一步验证。更新日期：2026-11-13。使用的[通用流程](./workflow.md)。
+状态：推理和训练四格单变量矩阵均已完成，DCU 侧主要机制已定位；跨硬件剩余差距缺少 NV trace，尚不能归因。更新日期：2026-11-13。使用的[通用流程](./workflow.md)。
 
 ## 当前结论
 
-这不是 `mnasnet1_0` 那样的 HIP Graph 长时间卡顿。原始 Graph trace 的回放正常；原表中 Graph 开启的行数值较快，但还伴随其它配置变化。两个退化的 noGraph 场景都出现大量 channels-last 激活被卷积入口转回 NCHW 的拷贝。保持模型、batch、精度和 Graph 设置不变，只用 `TORCHINDUCTOR_LAYOUT_OPTIMIZATION=0` 关闭 Inductor 布局优化，本机推理从 84.36 ms 降至 45.09 ms，训练从 221.18 ms 降至 158.15 ms，两者 accuracy 均 pass。该环境变量作用于整个进程，且 Graph 开启模式及其它模型尚无回归数据，因此它是当前模型的运行规避，不是通用源码修复。
+本机推理四格单变量矩阵说明原表 85→47 ms 的改善主要来自 max-autotune 改变卷积实现和融合路径，而非 Graph。训练四格矩阵显示：静态输入下 Graph 仅从 221.18 降到 218.91 ms；动态 batch 下则从 200.52 降到 177.61 ms。动态形状本身还会避开 Inductor 布局优化，消除大量激活拷贝；所以原表训练 226→179 ms 是动态形状与 Graph 的共同作用。详细数据见下文。
+
+这不是 `mnasnet1_0` 那样的 HIP Graph 长时间卡顿。原始 Graph trace 的回放正常；原表中 Graph 开启的行数值较快，但还伴随其它配置变化。两个退化的 noGraph 场景都出现大量 channels-last 激活被卷积入口转回 NCHW 的拷贝。保持模型、batch、精度和 Graph 设置不变，只用 `TORCHINDUCTOR_LAYOUT_OPTIMIZATION=0` 关闭 Inductor 布局优化，本机推理从 84.36 ms 降至 45.09 ms，训练从 221.18 ms 降至 158.15 ms，两者 accuracy 均 pass。相同的布局开关在 `max_autotune + Graph` 推理中未见稳态收益（44.11 对 44.72 ms），因此不能把它作为四条配置的统一修复。该环境变量作用于整个进程，且其它模型尚无回归数据，所以它是当前 noGraph 场景的运行规避，不是通用源码修复。
 
 ## 模型概况
 
@@ -53,7 +55,7 @@ python /home/pytorch/benchmarks/dynamo/timm_models.py \
 | 修改前本地基线 | BW1102，AMP 训练，Graph 关，默认布局优化 | 191.68 | 221.179 | 0.867 | 218.182 | pass | `/workspace/perf_results/adv_inception_v3/train_before/` |
 | 布局优化关闭实验 | BW1102，AMP 训练，Graph 关，其余同上 | 191.50 | 158.147 | 1.211 | 198.506 | pass | `/workspace/perf_results/adv_inception_v3/train_layout_off/` |
 
-`--repeat 5` 是单次 harness 运行中的五组计时，不是五次独立进程；后续若形成修复结论，仍需独立进程复测波动。原表中 Graph 开启的两种配置尚未做本地正式 benchmark，不以 profiler 时长替代。关闭布局优化后的本地编译耗时从 34.854 s 变为 39.133 s，属于不同编译图的冷编译结果；这次稳态收益不应与冷编译收益混淆。
+`--repeat 5` 是单次 harness 运行中的五组计时，不是五次独立进程；后续若形成修复结论，仍需独立进程复测波动。Graph 开启的推理和训练配置均在下文补测。不以 profiler 时长替代正式 benchmark。关闭布局优化后的本地编译耗时从 34.854 s 变为 39.133 s，属于不同编译图的冷编译结果；这次稳态收益不应与冷编译收益混淆。
 
 AMP 训练 noGraph 的本地 accuracy 也已 pass；该场景捕获 2 个不同图，报告 6 次 graph break（5 个不同位置），accuracy 运行中的编译耗时约 169.93 s。`--performance --cold-start-latency --repeat 3` 得到 compiled `221.179469 ms`、speedup `0.866640`（反算 eager 约 191.68 ms）、编译耗时 `218.181941 s`、7 次 graph break；与原表 BW1101 的 226.175 ms、0.886 接近。结果在 `/workspace/perf_results/adv_inception_v3/train_before/`。推理的 0 graph break 结果不能直接用于解释训练开销。
 
@@ -89,7 +91,75 @@ TORCHINDUCTOR_LAYOUT_OPTIMIZATION=0 python /home/pytorch/benchmarks/dynamo/timm_
   --output perf_train_no_graph.csv
 ```
 
+## max-autotune + Graph 推理补测
+
+按原表相同的 BF16 推理、batch 128、`TORCHINDUCTOR_MAX_AUTOTUNE=1`，不加 `--disable-cudagraphs`，在 BW1102 上做同机对照。两次 accuracy 均 pass，均为 1 张图、0 graph break；性能使用 `--cold-start-latency --repeat 5`。完整输出在 `/workspace/perf_results/adv_inception_v3/graph_max_auto_default/` 和 `graph_max_auto_layout_off/`。
+
+| 布局优化 | eager≈ ms | compiled ms | speedup | 编译耗时 s | compiled 峰值 GB |
+|---|---:|---:|---:|---:|---:|
+| 默认开启 | 65.88 | 44.110 | 1.493 | 255.413 | 1.847 |
+| `TORCHINDUCTOR_LAYOUT_OPTIMIZATION=0` | 65.96 | 44.725 | 1.475 | 166.919 | 1.670 |
+
+默认布局的稳态与原表 BW1101 的 46.728 ms、speedup 1.466 接近；关闭布局优化后没有观察到 noGraph 那样的加速，约 0.6 ms 差异不足以判断小幅好坏。冷编译时间因不同布局与 autotune 缓存/候选不同而变化，不以此声称编译加速。
+
+```bash
+# 工作目录：/tmp；已先执行 source /opt/dtk/env.sh
+TORCHINDUCTOR_MAX_AUTOTUNE=1 python /home/pytorch/benchmarks/dynamo/timm_models.py \
+  --performance --cold-start-latency --repeat 5 --inference --bfloat16 \
+  --backend inductor --device cuda --only adv_inception_v3 --batch-size 128 \
+  --output-directory /workspace/perf_results/adv_inception_v3/graph_max_auto_default \
+  --output perf.csv
+# 第二次保持上述命令，只加 TORCHINDUCTOR_LAYOUT_OPTIMIZATION=0，
+# 并把输出目录改为 graph_max_auto_layout_off。
+```
+
+### 推理：拆开 Graph 与 max-autotune
+
+在同一台 BW1102、同一 BF16/batch 128 输入下补全四格单变量矩阵，accuracy 均 pass、0 graph break。Graph 不加 `--disable-cudagraphs` 即开启；max-autotune 用 `TORCHINDUCTOR_MAX_AUTOTUNE=1` 控制。四次性能均用 `--repeat 5`。
+
+| Graph | max-autotune | compiled ms | speedup | 对应结果 |
+|---|---|---:|---:|---|
+| 关 | 关 | 84.361 | 0.771 | `before/perf_inference_no_graph.csv` |
+| 开 | 关 | 85.882 | 0.781 | `graph_default/perf.csv` |
+| 关 | 开 | 43.410 | 1.506 | `no_graph_max_auto/perf.csv` |
+| 开 | 开 | 44.110 | 1.493 | `graph_max_auto_default/perf.csv` |
+
+这组数据表明 **max-autotune 是主要收益来源**；Graph 在两组内部的约 0.7–1.5 ms 差异很小，单次运行不足以证明小幅好坏。原表把 max-autotune 与 Graph 同时打开，因此不能把 85→47 ms 归因于 Graph。额外的 noGraph max-autotune profiler trace 显示：与原始默认 noGraph trace 相比，compiled `aten::_convolution` 从 94 次降到 17 次，`aten::copy_` 从 148 次降到 34 次，GPU kernel 从 484 个降到 271 个；direct-copy GPU 时间从约 43.54 ms 降到 6.08 ms。出现 `triton_tem_fused_*convolution*` 模板及与 BN/ReLU 的融合，说明调优改变了卷积实现与布局转换路径。跨 BW1101/BW1102 的 trace 时长只作机制对照，正式速度比较使用本机 CSV。
+
+本机 max-autotune noGraph accuracy 的首次尝试在 360 秒时超时，日志显示模型准备约 260 秒；改用已缓存的权重并设置 `HF_HUB_OFFLINE=1` 后通过。性能命令也使用该缓存设置，profile 仍在计时后单独运行。两份日志及结果在 `/workspace/perf_results/adv_inception_v3/no_graph_max_auto/`。
+
+### 训练：拆开动态 batch 与 Graph
+
+在同一 BW1102、AMP 训练、batch 128 下补齐四格矩阵。静态输入是不加 `--dynamic-shapes --dynamic-batch-only`；动态输入同时加两项。Graph 关闭时加 `--disable-cudagraphs`。四格 accuracy 均 pass，均为 2 张图、6 次 graph break；性能运行都用 `--cold-start-latency --repeat 3`，其 graph break 均为 7 次。
+
+| 动态 batch | Graph | compiled ms | 输出 speedup | compilation_latency s | 结果目录 |
+|---|---|---:|---:|---:|---|
+| 关 | 关 | 221.179 | 0.867 | 218.182 | `train_before/` |
+| 关 | 开 | 218.911 | 0.873 | 84.481 | `static_train_graph_default/` |
+| 开 | 关 | 200.516 | 5.133* | 80.767 | `dynamic_train_no_graph/` |
+| 开 | 开 | 177.606 | 4.396* | 181.389 | `dynamic_train_graph_default/` |
+
+\*动态行的 speedup 由于本机 harness 对 eager 和 compiled 使用不同 batch，不能按同输入加速比解读；见下文。比较相同动态设置的 compiled 绝对时延，Graph 开启缩短约 **22.91 ms（11.4%）**。静态设置仅缩短约 **2.27 ms（1.0%）**，一次运行不足以证明这点小差异。保持 Graph 关闭、仅打开动态 batch 则从 221.179 降至 200.516 ms（约 **9.3%**）。原表静态 noGraph 与动态 Graph 的性能差由两项变化共同造成，并有明显交互；不能简单把动态、Graph 的收益推广到对方模式。四次冷编译耗时受缓存与运行顺序影响，未进行独立冷缓存复测，不据此比较编译性能。
+
+动态 noGraph 的本机 trace 在 `actual` 段有 **1445 个 GPU kernel、约 171.02 ms**；整个 trace 中只有 **2 个 direct-copy kernel、约 0.09 ms**，Graph launch 为 0。它与静态默认 noGraph 原始 trace 的约 148 个 direct-copy 形成机制对照。本机源码 `torch/_inductor/graph.py:GraphLowering.decide_layout_opt` 遇到卷积输入含自由符号时返回 False，跳过布局优化；动态 batch 会触发这一条件。故动态配置的拷贝消失不能归功于 Graph。相较本机静态布局关闭的训练 trace（1454 个 GPU kernel、约 154.77 ms），动态 noGraph 仍有额外开销，表明布局转换并非训练的唯一问题。
+
+```bash
+# 工作目录：/tmp；先执行 source /opt/dtk/env.sh；已缓存的权重设置 HF_HUB_OFFLINE=1
+HF_HUB_OFFLINE=1 python /home/pytorch/benchmarks/dynamo/timm_models.py \
+  --performance --cold-start-latency --repeat 3 --training --amp \
+  --backend inductor --device cuda --dynamic-shapes --dynamic-batch-only \
+  --disable-cudagraphs --only adv_inception_v3 --batch-size 128 \
+  --export-profiler-trace \
+  --profiler-trace-name /workspace/perf_results/adv_inception_v3/dynamic_train_no_graph/trace \
+  --output-directory /workspace/perf_results/adv_inception_v3/dynamic_train_no_graph \
+  --output perf.csv
+# 对照格分别去掉 --disable-cudagraphs、去掉两项 dynamic 参数，
+# 并把输出目录改为相应的目录；accuracy 用相同配置另行运行。
+```
+
 ## Trace 定位：与 mnasnet 的 Graph 停顿不同
+
+**动态 batch 的 speedup 口径注意：**本机 benchmark 源码 `/home/pytorch/benchmarks/dynamo/common.py` 的 `speedup_experiment` 在 `--dynamic-batch-only` 时仅给 eager 的 `timed()` 传入 `batch_size`；`timed()` 会把输入 batch 随机变为原值的 80%–120%，compiled 则保持原始 batch 128。两路计时没有完全对齐输入，动态训练的 `speedup` 不应当作严格的同输入加速比。本机动态 Graph 复测的 compiled 为 177.606 ms，与原表 179.468 ms 接近，但其输出 `speedup=4.396` 反算 eager 约 780.7 ms，显著偏离原表约 210.0 ms，具体原因还需独立复测。分析 Graph 因果效应时优先比较同机同编译输入下的 compiled 绝对时延。
 
 五份原始 BW1101 trace 位于 `/home/profiler_traces/`，其中四份对应表中四配置，另有 BF16 推理 dynamic trace。profile 是计时后单独运行，以下时长仅用于定位，不能直接代替 CSV。
 
@@ -101,7 +171,7 @@ TORCHINDUCTOR_LAYOUT_OPTIMIZATION=0 python /home/pytorch/benchmarks/dynamo/timm_
 | 训练 dynamic | 200.89 ms | 181.31 ms | 2 次 `hipGraphLaunch` | 两个 compiled GPU annotation 约 116.64 + 58.92 ms；正常回放 |
 | 训练 no_cudagraphs | 203.31 ms | 331.33 ms | 0 | compiled GPU kernel 合计约 222.38 ms，eager 约 198.89 ms；profiler 对 CPU 段影响明显 |
 
-因此目前证据不支持把此模型归为 mnasnet 那样的 Graph replay 卡顿。原始数据中 Graph 打开的配置反而较快，但这些行还伴随其它参数变化；本地要用单变量对照进一步确认。
+因此证据不支持把此模型归为 mnasnet 那样的 Graph replay 卡顿。原始数据中 Graph 打开的配置反而较快，但这些行还伴随其它参数变化；上文两套四格矩阵已分离推理 max-autotune、训练动态 batch 与 Graph 的影响。
 
 ## 定位到重复布局转换
 
@@ -111,7 +181,7 @@ TORCHINDUCTOR_LAYOUT_OPTIMIZATION=0 python /home/pytorch/benchmarks/dynamo/timm_
 
 按父级 `_convolution` 的权重尺寸继续归因，98 次激活拷贝中有 40 次发生在 1×1 卷积（GPU 合计约 29.22 ms）、17 次发生在 3×3 卷积（约 9.90 ms），其余在 1×7、7×1 等分支卷积。瓶颈分散在多条 Inception 分支，并非单个异常 kernel。
 
-本地单变量验证：只设置 `TORCHINDUCTOR_LAYOUT_OPTIMIZATION=0`，其余配置、batch 和输入保持不变；accuracy 仍 pass，编译后稳态从 **84.361 ms 降到 45.086 ms（约 1.87 倍）**，speedup 从 **0.771 升到 1.448**，compiled 峰值显存从 1.129848 GB 降到 0.961482 GB。新 profiler trace 中 compiled 区段的 direct-copy kernel 从原始 trace 的 **148 个、43.54 ms** 降到 **3 个、0.37 ms**，GPU kernel 总时间从原始 BW1101 trace 的 83.94 ms 降为本机 43.22 ms。跨 BW1101/BW1102 的 trace 时长只能作机制对照；正式性能收益只用本机两组 benchmark 计算。该结果支持重复布局转换是 noGraph 推理退化的主要原因，但仍需独立进程复测波动及 Graph 开启模式回归。
+本地单变量验证：只设置 `TORCHINDUCTOR_LAYOUT_OPTIMIZATION=0`，其余配置、batch 和输入保持不变；accuracy 仍 pass，编译后稳态从 **84.361 ms 降到 45.086 ms（约 1.87 倍）**，speedup 从 **0.771 升到 1.448**，compiled 峰值显存从 1.129848 GB 降到 0.961482 GB。新 profiler trace 中 compiled 区段的 direct-copy kernel 从原始 trace 的 **148 个、43.54 ms** 降到 **3 个、0.37 ms**，GPU kernel 总时间从原始 BW1101 trace 的 83.94 ms 降为本机 43.22 ms。跨 BW1101/BW1102 的 trace 时长只能作机制对照；正式性能收益只用本机两组 benchmark 计算。该结果支持重复布局转换是默认 noGraph 推理退化的主要原因；还需独立进程复测波动。Graph 开启时的 max-autotune 配置已在上文回归，关闭布局优化没有进一步收益。
 
 训练布局关闭后的本地 trace 也显示 compiled 区段的 direct-copy kernel 仅 **8 个、1.09 ms**，Triton kernel 为 694 个、约 60.67 ms，全部 GPU kernel 为 1454 个、约 154.77 ms。原始 BW1101 训练 noGraph trace 分别为 148 个 direct-copy、1296 个 Triton、2196 个全部 kernel；跨设备的时间不能直接计算收益，但 kernel 数量和拷贝模式的变化与本机 benchmark 改善一致。训练残余开销仍包含大量 Triton kernel，不能认为布局关闭已解决所有性能差距。
 
@@ -123,14 +193,18 @@ TORCHINDUCTOR_LAYOUT_OPTIMIZATION=0 python /home/pytorch/benchmarks/dynamo/timm_
 
 | 假设 | 对照与证据 | 状态 |
 |---|---|---|
-| Graph 回放像 mnasnet 一样卡住 | Graph trace 回放为几十至百余毫秒，且原表 Graph 配置较快 | 不支持作为当前异常主因 |
+| Graph 回放像 mnasnet 一样卡住 | Graph trace 回放为几十至百余毫秒；推理四格矩阵中 Graph 几乎无差异，动态训练中 Graph 反而有约 11.4% 稳态收益 | 不支持作为当前异常主因 |
 | 大量布局转换压低 noGraph 加速比 | 推理 98 个激活 NHWC→NCHW 拷贝占约 43 ms；关闭布局优化后降到 3 个 copy、稳态加快约 1.87 倍；训练也从 221.18 降到 158.15 ms | 已确认是两个 noGraph 配置的主要瓶颈 |
+| 推理原表 Graph 开启导致 85→47 ms 提速 | 本机 Graph/max-autotune 四格矩阵：max-autotune 关闭约 84–86 ms，开启约 43–44 ms | 否；主要来自 max-autotune |
+| 训练原表 226→179 ms 全由 Graph 导致 | 本机静态 noGraph 221.18、静态 Graph 218.91、动态 noGraph 200.52、动态 Graph 177.61 ms；动态 noGraph 的 copy 基本消失 | 否；动态形状与 Graph 共同作用，且 Graph 收益依赖动态模式 |
 | NV 加速比差异完全来自布局 | 目前只有 DCU trace，没有 NV kernel/布局 trace | 未证实；需要同口径 NV trace |
 
-后续应补同配置的多次独立进程 benchmark、Graph 开启的 max_autotune/动态模式对照，以及同型号 NV trace，才能解释剩余加速比差距并决定是否修改 Inductor 布局启发式。关闭布局优化后推理 speedup 1.448 仍低于原表 NV 1.850，训练 1.211 仍低于原表 NV 2.070；这些跨硬件、跨环境数值仅作差距提示，不是同设备修复收益。当前没有源码修改；上面的布局关闭结果是配置实验，不是源码修复后的正式结果。若要做通用源码改动，需对其它卷积模型回归，避免全局关闭 channels-last 使本来受益的模型退化。
+后续应补同配置的多次独立进程 benchmark、对齐动态 eager/compiled 输入的 speedup 测量，以及同口径 NV trace，才能解释剩余跨硬件差距并决定是否修改 Inductor 布局启发式。关闭布局优化后推理 speedup 1.448 仍低于原表 NV 1.850，训练静态 noGraph 1.211 仍低于原表 NV 2.070；这些跨硬件、跨环境数值仅作差距提示，不是同设备修复收益。当前没有源码修改；上面的布局关闭结果是配置实验，不是源码修复后的正式结果。若要做通用源码改动，需对其它卷积模型回归，避免全局关闭 channels-last 使本来受益的模型退化。
 
 ## 可复用发现
 
 - 识别 `aten::copy_` 布局方向时，按目标、来源顺序解释 `Input Strides`，不要把 NCHW 与 channels-last 转换方向写反。
 - Graph 打开和 max_autotune、动态形状等配置同时变化时，原表不能直接给出 Graph 的单变量收益；需用相同 workload 额外重测。
+- 在当前 benchmark 的 `--dynamic-batch-only` 模式下，先检查 eager 与 compiled 是否收到相同 shape；本机 harness 只随机改变 eager 的 batch，输出 speedup 不能直接当同输入比值。
+- 动态形状可让 `GraphLowering.decide_layout_opt` 跳过布局优化。此时 copy kernel 减少不能归给 Graph；用动态 noGraph 与静态 Graph 两格区分。
 - profiler 中将 GPU kernel 与 CPU `aten::copy_` 按 `External id` 关联，再结合 shape/stride，可以把布局问题量化到具体激活张量。
