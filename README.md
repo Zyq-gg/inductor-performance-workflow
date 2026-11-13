@@ -25,6 +25,7 @@ git clone https://github.com/Zyq-gg/inductor-performance-workflow.git \
 | [`references/benchmark-guide.md`](references/benchmark-guide.md) | TorchBench/HuggingFace/timm 测试入口与结果说明 |
 | [`references/inductor-map.md`](references/inductor-map.md) | Inductor 性能分析工具与配置索引；选项以本机版本为准 |
 | [`references/mnasnet1_0-case.md`](references/mnasnet1_0-case.md) | 首个案例：HIP Graph 回放异常的逐步定位与待办 |
+| [`references/adv_inception_v3-case.md`](references/adv_inception_v3-case.md) | 第二个案例：布局转换导致 noGraph 退化的分析与验证 |
 | [`scripts/micro_hip_graph_repro.py`](scripts/micro_hip_graph_repro.py) | 该案例的纯 eager 手动 Graph 最小复现 |
 
 `assets/benchmark-image-*.png` 是测试说明中的两张示意图。

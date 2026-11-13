@@ -1,6 +1,6 @@
 # Inductor 模型性能分析与优化流程
 
-版本：2026-11-11（随每个模型的分析更新）
+版本：2026-11-13（随每个模型的分析更新）
 
 本流程用于用户已初步确认存在性能问题的 TorchBench、HuggingFace、timm 等模型：编译后比 eager 慢，或编译相对 eager 的提升明显小于 NV 官方结果。每个模型保留一份独立报告；通用方法和已证实的共性经验回写本文件。当前实例：[mnasnet1_0 报告](./mnasnet1_0-case.md)。
 
@@ -62,9 +62,12 @@ python benchmarks/dynamo/torchbench.py --performance --cold-start-latency \
 - **Graph 定位：** 同一输入分别跑静态/动态及 Graph 开/关；把捕获、回放、内存和节点证据分开记录。trace 中“耗时最长的 kernel”不一定是缺陷所在，因为 Graph 停顿可落在不同事件上。
 - **缩减验证：** 纯 eager 手动 Graph 能复现时，可排除 Inductor/CUDA Graph Tree 作为该小图触发的必要条件；是否解释完整模型仍需独立证据。裁剪后要重新验证静态/动态条件。
 - **插桩影响：** Graph 探针、profiler 可能改变实例化时机、耗时，甚至触发 VMFault；必须把插桩观察与正式 benchmark 分开。
+- **布局转换定位：** 把 GPU copy kernel 与 CPU `aten::copy_` 按 profiler `External id` 对齐，再按 `copy_(dest, src)` 顺序解读 shape/stride；用同一模型、同一 Graph 设置下的布局优化开/关验证性能影响。卷积算子自身时间相近时，重复的激活转换可能是主要差距。见 [adv_inception_v3](./adv_inception_v3-case.md)。
+- **跨配置比较：** 表中 Graph 开关若与 max-autotune 或动态形状一起变化，不能把两行速度差直接归给 Graph；需补单变量测试。见 [adv_inception_v3](./adv_inception_v3-case.md)。
 
 ### 修订记录
 
 | 日期 | 变更 | 依据 |
 |---|---|---|
 | 2026-11-11 | 初版：统一模型报告、基线/复测口径、Graph 单变量定位与回写规则 | mnasnet1_0 分析与 benchmark 使用文档 |
+| 2026-11-13 | 增加按 External id 追踪激活布局转换及跨配置比较边界 | adv_inception_v3 分析 |
