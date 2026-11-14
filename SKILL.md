@@ -19,3 +19,5 @@ Use this skill when the user provides a model or results showing a compiled perf
 ## Case reference
 
 [mnasnet1_0](references/mnasnet1_0-case.md) illustrates a Graph replay regression, evidence boundaries, and an unfinished baseline/fix status. The included [minimal HIP Graph reproduction](scripts/micro_hip_graph_repro.py) is an optional case artifact; it requires a compatible GPU/PyTorch environment and may trigger a device fault on affected systems.
+
+[AlbertForMaskedLM](references/AlbertForMaskedLM-case.md) illustrates a weak compile speedup caused by Transformers tracing an unnecessary attention mask and selecting math SDPA. The [opt-in process overlay](scripts/albert_sdpa_mask_overlay/sitecustomize.py) demonstrates the scoped correction with an isolated Python process.

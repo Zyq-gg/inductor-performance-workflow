@@ -2,7 +2,7 @@
 
 版本：2026-11-14（随每个模型的分析更新）
 
-本流程用于用户已初步确认存在性能问题的 TorchBench、HuggingFace、timm 等模型：编译后比 eager 慢，或编译相对 eager 的提升明显小于 NV 官方结果。每个模型保留一份独立报告；通用方法和已证实的共性经验回写本文件。当前实例：[mnasnet1_0 报告](./mnasnet1_0-case.md)、[adv_inception_v3 报告](./adv_inception_v3-case.md)、[alexnet 报告](./alexnet-case.md)。
+本流程用于用户已初步确认存在性能问题的 TorchBench、HuggingFace、timm 等模型：编译后比 eager 慢，或编译相对 eager 的提升明显小于 NV 官方结果。每个模型保留一份独立报告；通用方法和已证实的共性经验回写本文件。当前实例：[mnasnet1_0 报告](./mnasnet1_0-case.md)、[adv_inception_v3 报告](./adv_inception_v3-case.md)、[alexnet 报告](./alexnet-case.md)、[AlbertForMaskedLM 报告](./AlbertForMaskedLM-case.md)。
 
 ## 1. 建立模型报告与测量口径
 
@@ -71,6 +71,7 @@ python benchmarks/dynamo/torchbench.py --performance --cold-start-latency \
 - **调优候选失败：** max-autotune 可忽略调用失败的 ATen 候选，继续用慢的 Triton 候选完成编译；同时检查算子 schema、候选错误和选中 kernel 的耗时。alexnet 训练中 `convolution_backward.out` 参数与 schema 不符，ATen 候选被忽略，11×11 权重梯度退化到约 39 ms 的 Triton kernel；修复后候选约 0.67 ms。见 [alexnet](./alexnet-case.md)。
 - **Graph 中的慢 kernel：** Graph 回放后的长同步不一定是 Graph runtime 停顿。保持 max-autotune 等条件不变，只关 Graph；若完整模型同样慢，展开 noGraph kernel trace。alexnet 两路均约 73 ms，noGraph 直接显示约 41 ms 和 10 ms 的慢反向卷积。见 [alexnet](./alexnet-case.md)。
 - **实际导入的 torch：** 修改源码树后，先用 `torch.__file__` 核对 benchmark 是否运行安装版。若源码尚未构建，必须让测试环境使用待验证的补丁，并保留原安装文件与缓存隔离；不把只改源码树后的 benchmark 误称为修改后复测。TorchBench 的目录探测也可能优先选到名称相似但不是模型仓库的目录，应验证 `torchbenchmark.__file__`。见 [alexnet](./alexnet-case.md)。
+- **注意力前端分支：** 当 eager 用 Flash Attention 而 compiled 变成 GEMM + softmax 时，先比较相同 Q/K/V、dtype、stride、scale、mask 的裸 SDPA，再逐层加回模型的 mask 构造。检查 `is_tracing()` 等仅在编译时走的分支是否生成 eager 没有的冗余 mask；AOT 图里若已是 `bmm`、显式 softmax，优先修前端判定，不先调 Inductor GEMM。用进程独立覆盖和新编译缓存验证路径，完整模型仍须复测。见 [AlbertForMaskedLM](./AlbertForMaskedLM-case.md)。
 
 ### 修订记录
 
@@ -82,3 +83,4 @@ python benchmarks/dynamo/torchbench.py --performance --cold-start-latency \
 | 2026-11-13 | 增加动态 batch 的 eager/compiled 输入对齐检查 | adv_inception_v3 训练复测及 benchmark 源码 |
 | 2026-11-13 | 增加动态形状对布局启发式的影响及训练四格对照 | adv_inception_v3 训练 trace 与 Inductor 源码 |
 | 2026-11-14 | 增加调优候选失败、Graph 内慢 kernel、实际导入版本的核查步骤 | alexnet 源码修复与复测 |
+| 2026-11-14 | 增加 SDPA 前端追踪分支与冗余 mask 的逐层缩减定位 | AlbertForMaskedLM 最小复现与 AOT/trace 对照 |

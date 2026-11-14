@@ -27,11 +27,15 @@ git clone https://github.com/Zyq-gg/inductor-performance-workflow.git \
 | [`references/mnasnet1_0-case.md`](references/mnasnet1_0-case.md) | 首个案例：HIP Graph 回放异常的逐步定位与待办 |
 | [`references/adv_inception_v3-case.md`](references/adv_inception_v3-case.md) | 第二个案例：布局转换、max-autotune 与 Graph 的单变量分析 |
 | [`references/alexnet-case.md`](references/alexnet-case.md) | 第三个案例：卷积反向调优候选失败与布局转换的定位、修复和复测 |
+| [`references/AlbertForMaskedLM-case.md`](references/AlbertForMaskedLM-case.md) | 第四个案例：无 mask 注意力在追踪中丢失 Flash Attention 的定位与复测 |
 | [`scripts/micro_hip_graph_repro.py`](scripts/micro_hip_graph_repro.py) | 该案例的纯 eager 手动 Graph 最小复现 |
+| [`scripts/albert_sdpa_mask_overlay/sitecustomize.py`](scripts/albert_sdpa_mask_overlay/sitecustomize.py) | Transformers 5.10.1 无 mask SDPA 路径的进程内诊断修正 |
 
 `assets/benchmark-image-*.png` 是测试说明中的两张示意图。
 
 `mnasnet1_0` 案例中的 `/home/...` 与 `/workspace/...` 是原分析机器上的路径；仓库只收录文档和最小脚本，不包含原始 trace、设备日志或模型权重。案例目前已定位到 Graph 回放路径，但底层根因、源码修复以及正式同口径前后 benchmark 尚未完成。
+
+AlbertForMaskedLM 的覆盖脚本可用 `PYTHONPATH="$PWD/scripts/albert_sdpa_mask_overlay"` 作用于单次 Python 进程。它只处理 `padding_mask is None` 且无局部注意力限制的情况，用于验证编译时冗余 mask 对 Flash Attention 的影响；其余情况调用 Transformers 原函数。具体版本、命令、正确性和性能证据见案例报告。
 
 ## 使用示例
 
