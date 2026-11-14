@@ -26,6 +26,7 @@ git clone https://github.com/Zyq-gg/inductor-performance-workflow.git \
 | [`references/inductor-map.md`](references/inductor-map.md) | Inductor 性能分析工具与配置索引；选项以本机版本为准 |
 | [`references/mnasnet1_0-case.md`](references/mnasnet1_0-case.md) | 首个案例：HIP Graph 回放异常的逐步定位与待办 |
 | [`references/adv_inception_v3-case.md`](references/adv_inception_v3-case.md) | 第二个案例：布局转换、max-autotune 与 Graph 的单变量分析 |
+| [`references/alexnet-case.md`](references/alexnet-case.md) | 第三个案例：卷积反向调优候选失败与布局转换的定位、修复和复测 |
 | [`scripts/micro_hip_graph_repro.py`](scripts/micro_hip_graph_repro.py) | 该案例的纯 eager 手动 Graph 最小复现 |
 
 `assets/benchmark-image-*.png` 是测试说明中的两张示意图。
